@@ -1,0 +1,1 @@
+/* dummy pthread.h for Windows MSVC */
