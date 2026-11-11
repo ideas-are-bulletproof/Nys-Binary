@@ -112,15 +112,15 @@ If you wish to configure, modify, or re-run specific ablations individually, you
   taus = [0.40, 0.50, 0.60, 0.70, 0.85, 0.95]
   ```
 
-#### Figure 8 & Table 7: Landmark Budget Pareto Sweep ($m \in [16, 500]$)
+#### Figure 8 & Table 7: Landmark Budget Pareto Sweep ($m \in [64, 1000]$)
 * **Notebook Location:** Section 2.3
 * **CLI Command:**
   ```bash
-  python rigorous_ablation_system.py --sweep landmark_sweep --m_list 16 32 64 125 250 500
+  python rigorous_ablation_system.py --sweep landmark_sweep --m_list 64 125 250 500 1000
   ```
 * **Python Configuration:**
   ```python
-  for m in [16, 32, 64, 125, 250, 500]:
+  for m in [64, 125, 250, 500, 1000]:
       cfg = ras.AblationConfig(m_landmarks=m, k_total=250)
   ```
 

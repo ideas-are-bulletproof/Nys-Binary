@@ -1219,3 +1219,491 @@ def plot_nystrom_pareto_curve(
         plt.savefig(save_path, bbox_inches="tight")
         print(f"Saved Pareto curve to: {save_path}")
     plt.close()
+
+
+# =============================================================================
+# 11. STANDALONE CLI ABLATION RUNNERS & ARGPARSE ENTRYPOINT
+# =============================================================================
+def run_landmark_sweep(
+    dataset_name: str = "cora",
+    m_list: List[int] = [64, 125, 250, 500, 1000],
+    train_ratio: float = 0.70,
+    seed: int = 42,
+    device: str = "cpu",
+    probe_type: str = "gcn",
+    plot: bool = True,
+    output_dir: str = "Results",
+    fig_dir: str = "figures"
+) -> pd.DataFrame:
+    """Executes landmark budget scaling sweep (Figure 8 & Table 7)."""
+    print("=" * 75)
+    print("  NyS-Binary Ablation: Nyström Landmark Budget Pareto Sweep")
+    print(f"  Dataset: {dataset_name.upper()} | Landmarks (m): {m_list}")
+    print(f"  Train Ratio: {train_ratio*100:.1f}% | Probe: {probe_type.upper()} | Seed: {seed}")
+    print("=" * 75)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+    
+    ds = bna.load_dataset(dataset_name)
+    G = ds["G"]
+    pyg = ds["pyg_data"]
+    y = ds["labels"]
+    n = G.number_of_nodes()
+    
+    np.random.seed(seed)
+    indices = np.arange(n)
+    np.random.shuffle(indices)
+    split_pt = int(train_ratio * n)
+    train_mask = np.zeros(n, dtype=bool)
+    train_mask[indices[:split_pt]] = True
+    test_mask = ~train_mask
+    e_idx = getattr(pyg, 'edge_index', None)
+    
+    # 1. Exact SVD structural baseline
+    print("\n[1/2] Computing Exact SVD Structural Baseline...")
+    cfg_svd = AblationConfig(struct_mode="exact_svd", k_total=250, seed=seed, device=device)
+    emb_svd, svd_time, _ = generate_ablated_representation(G, pyg, y, train_mask, cfg_svd)
+    m_svd = evaluate_representation_probe(emb_svd, y, train_mask, test_mask, probe_type=probe_type, edge_index=e_idx, device=device)
+    exact_svd_time = svd_time
+    exact_svd_acc = m_svd["accuracy"]
+    print(f"  -> Exact SVD: Latency = {exact_svd_time:.4f}s | Accuracy = {exact_svd_acc:.2f}% (Macro-F1 = {m_svd['macro_f1']:.2f}%)")
+    
+    # 2. Nystrom landmark scaling
+    print("\n[2/2] Evaluating Nyström Landmark Scaling (m in m_list)...")
+    records = []
+    runtimes = []
+    accuracies = []
+    
+    for m in m_list:
+        cfg = AblationConfig(struct_mode="nystrom", m_landmarks=m, k_total=250, seed=seed, device=device)
+        emb, gen_time, diag = generate_ablated_representation(G, pyg, y, train_mask, cfg)
+        m_res = evaluate_representation_probe(emb, y, train_mask, test_mask, probe_type=probe_type, edge_index=e_idx, device=device)
+        acc = m_res["accuracy"]
+        f1 = m_res["macro_f1"]
+        runtimes.append(gen_time)
+        accuracies.append(acc)
+        speedup = exact_svd_time / max(gen_time, 1e-6)
+        records.append({
+            "Dataset": dataset_name,
+            "Landmarks_m": m,
+            "Gen_Time_s": gen_time,
+            "Accuracy": acc,
+            "Macro_F1": f1,
+            "Speedup_vs_ExactSVD": speedup,
+            "Exact_SVD_Time_s": exact_svd_time,
+            "Exact_SVD_Acc": exact_svd_acc
+        })
+        print(f"  m = {m:4d}: Latency = {gen_time:7.4f}s | Acc = {acc:6.2f}% | Macro-F1 = {f1:6.2f}% | Speedup = {speedup:5.1f}x")
+        
+    df_results = pd.DataFrame(records)
+    csv_path = os.path.join(output_dir, f"ablation_landmark_sweep_{dataset_name}.csv")
+    df_results.to_csv(csv_path, index=False)
+    print(f"\n[Saved] Landmark sweep results saved to: {csv_path}")
+    
+    if plot:
+        fig_path = os.path.join(fig_dir, "ablation_nystrom_pareto.png")
+        plot_nystrom_pareto_curve(m_list, runtimes, accuracies, exact_svd_time, exact_svd_acc, save_path=fig_path)
+    
+    return df_results
+
+
+def run_hops_sweep(
+    dataset_name: str = "cora",
+    hops_list: List[int] = [0, 1, 2, 3, 4, 6, 8],
+    train_ratio: float = 0.70,
+    seed: int = 42,
+    device: str = "cpu",
+    probe_type: str = "gcn",
+    plot: bool = True,
+    output_dir: str = "Results",
+    fig_dir: str = "figures"
+) -> pd.DataFrame:
+    """Executes diffusion horizon sensitivity sweep (Figure 6 & Table 6)."""
+    print("=" * 75)
+    print("  NyS-Binary Ablation: Diffusion Radius (hops) Sensitivity Sweep")
+    print(f"  Dataset: {dataset_name.upper()} | Hops: {hops_list}")
+    print(f"  Train Ratio: {train_ratio*100:.1f}% | Probe: {probe_type.upper()} | Seed: {seed}")
+    print("=" * 75)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+    
+    ds = bna.load_dataset(dataset_name)
+    G = ds["G"]
+    pyg = ds["pyg_data"]
+    y = ds["labels"]
+    n = G.number_of_nodes()
+    
+    np.random.seed(seed)
+    indices = np.arange(n)
+    np.random.shuffle(indices)
+    split_pt = int(train_ratio * n)
+    train_mask = np.zeros(n, dtype=bool)
+    train_mask[indices[:split_pt]] = True
+    test_mask = ~train_mask
+    e_idx = getattr(pyg, 'edge_index', None)
+    
+    records = []
+    hops_curve = []
+    for h in hops_list:
+        cfg = AblationConfig(hops=h, m_landmarks=125, k_total=250, seed=seed, device=device)
+        emb, gen_time, _ = generate_ablated_representation(G, pyg, y, train_mask, cfg)
+        m_res = evaluate_representation_probe(emb, y, train_mask, test_mask, probe_type=probe_type, edge_index=e_idx, device=device)
+        acc = m_res["accuracy"]
+        f1 = m_res["macro_f1"]
+        hops_curve.append((h, acc))
+        records.append({
+            "Dataset": dataset_name,
+            "Hops": h,
+            "Accuracy": acc,
+            "Macro_F1": f1,
+            "Gen_Time_s": gen_time
+        })
+        print(f"  Hops = {h:2d}: Accuracy = {acc:6.2f}% | Macro-F1 = {f1:6.2f}% | Latency = {gen_time:7.4f}s")
+        
+    df_results = pd.DataFrame(records)
+    csv_path = os.path.join(output_dir, f"ablation_hops_sweep_{dataset_name}.csv")
+    df_results.to_csv(csv_path, index=False)
+    print(f"\n[Saved] Hops sweep results saved to: {csv_path}")
+    
+    if plot:
+        fig_path = os.path.join(fig_dir, "ablation_hops_homophily_curve.png")
+        plot_hops_homophily_curve({dataset_name: hops_curve}, save_path=fig_path)
+        
+    return df_results
+
+
+def run_grid_sweep(
+    dataset_name: str = "cora",
+    alphas: List[float] = [0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0],
+    thresholds: List[float] = [0.4, 0.5, 0.6, 0.7, 0.85, 0.95],
+    train_ratio: float = 0.70,
+    seed: int = 42,
+    device: str = "cpu",
+    probe_type: str = "gcn",
+    plot: bool = True,
+    output_dir: str = "Results",
+    fig_dir: str = "figures"
+) -> pd.DataFrame:
+    """Executes 2D factorial interaction grid over alpha and tau (Figure 7)."""
+    print("=" * 75)
+    print("  NyS-Binary Ablation: Factorial Interaction Grid Sweep (alpha x tau)")
+    print(f"  Dataset: {dataset_name.upper()} | Alphas: {alphas} | Thresholds (tau): {thresholds}")
+    print(f"  Train Ratio: {train_ratio*100:.1f}% | Probe: {probe_type.upper()} | Seed: {seed}")
+    print("=" * 75)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+    
+    ds = bna.load_dataset(dataset_name)
+    acc_grid, f1_grid, yield_grid = run_factorial_alpha_threshold_sweep(
+        ds, alphas=alphas, thresholds=thresholds,
+        train_ratio=train_ratio, seed=seed, device=device, probe_type=probe_type
+    )
+    
+    print("\nAccuracy Grid (Rows=Alpha, Cols=Tau):")
+    print("Alpha \\ Tau | " + " | ".join([f"{th:5.2f}" for th in thresholds]))
+    print("-" * 65)
+    for i, a in enumerate(alphas):
+        row_str = " | ".join([f"{acc_grid[i, j]:5.2f}%" for j in range(len(thresholds))])
+        print(f"   {a:5.2f}    | {row_str}")
+        
+    df_grid = pd.DataFrame(acc_grid, index=alphas, columns=thresholds)
+    csv_path = os.path.join(output_dir, f"ablation_alpha_threshold_grid_{dataset_name}.csv")
+    df_grid.to_csv(csv_path)
+    print(f"\n[Saved] Factorial grid results saved to: {csv_path}")
+    
+    if plot:
+        fig_path = os.path.join(fig_dir, f"ablation_alpha_threshold_heatmap_{dataset_name}.png")
+        plot_factorial_alpha_threshold_heatmap(acc_grid, alphas, thresholds, dataset_name=dataset_name.capitalize(), save_path=fig_path)
+        
+    return df_grid
+
+
+def run_budget_sweep(
+    dataset_name: str = "cora",
+    ratios: List[float] = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0],
+    train_ratio: float = 0.70,
+    seed: int = 42,
+    device: str = "cpu",
+    probe_type: str = "gcn",
+    output_dir: str = "Results"
+) -> pd.DataFrame:
+    """Executes structural vs. semantic budget split sweep (Figure 9 & Table 8)."""
+    print("=" * 75)
+    print("  NyS-Binary Ablation: Structural vs. Semantic Budget Split Sweep")
+    print(f"  Dataset: {dataset_name.upper()} | Struct Ratios: {ratios}")
+    print(f"  Train Ratio: {train_ratio*100:.1f}% | Probe: {probe_type.upper()} | Seed: {seed}")
+    print("=" * 75)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    ds = bna.load_dataset(dataset_name)
+    G = ds["G"]
+    pyg = ds["pyg_data"]
+    y = ds["labels"]
+    n = G.number_of_nodes()
+    
+    np.random.seed(seed)
+    indices = np.arange(n)
+    np.random.shuffle(indices)
+    split_pt = int(train_ratio * n)
+    train_mask = np.zeros(n, dtype=bool)
+    train_mask[indices[:split_pt]] = True
+    test_mask = ~train_mask
+    e_idx = getattr(pyg, 'edge_index', None)
+    
+    records = []
+    for r in ratios:
+        cfg = AblationConfig(struct_ratio=r, k_total=250, seed=seed, device=device)
+        emb, gen_time, diag = generate_ablated_representation(G, pyg, y, train_mask, cfg)
+        m_res = evaluate_representation_probe(emb, y, train_mask, test_mask, probe_type=probe_type, edge_index=e_idx, device=device)
+        acc = m_res["accuracy"]
+        f1 = m_res["macro_f1"]
+        records.append({
+            "Dataset": dataset_name,
+            "Struct_Ratio": r,
+            "k_struct": diag["k_struct"],
+            "k_label": diag["k_label"],
+            "Accuracy": acc,
+            "Macro_F1": f1,
+            "Gen_Time_s": gen_time
+        })
+        print(f"  Ratio = {r:4.2f} (k_str={diag['k_struct']:3d}, k_lbl={diag['k_label']:3d}): Acc = {acc:6.2f}% | Macro-F1 = {f1:6.2f}%")
+        
+    df_results = pd.DataFrame(records)
+    csv_path = os.path.join(output_dir, f"ablation_budget_sweep_{dataset_name}.csv")
+    df_results.to_csv(csv_path, index=False)
+    print(f"\n[Saved] Budget split results saved to: {csv_path}")
+    return df_results
+
+
+def run_backbone_sweep(
+    dataset_name: str = "cora",
+    modes: List[str] = ["nystrom", "exact_svd", "random_walk_pe", "degree", "random_noise"],
+    train_ratio: float = 0.70,
+    seed: int = 42,
+    device: str = "cpu",
+    probe_type: str = "gcn",
+    output_dir: str = "Results"
+) -> pd.DataFrame:
+    """Executes structural backbone comparison sweep (Table 9)."""
+    print("=" * 75)
+    print("  NyS-Binary Ablation: Structural Backbone Comparison Sweep")
+    print(f"  Dataset: {dataset_name.upper()} | Modes: {modes}")
+    print(f"  Train Ratio: {train_ratio*100:.1f}% | Probe: {probe_type.upper()} | Seed: {seed}")
+    print("=" * 75)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    ds = bna.load_dataset(dataset_name)
+    G = ds["G"]
+    pyg = ds["pyg_data"]
+    y = ds["labels"]
+    n = G.number_of_nodes()
+    
+    np.random.seed(seed)
+    indices = np.arange(n)
+    np.random.shuffle(indices)
+    split_pt = int(train_ratio * n)
+    train_mask = np.zeros(n, dtype=bool)
+    train_mask[indices[:split_pt]] = True
+    test_mask = ~train_mask
+    e_idx = getattr(pyg, 'edge_index', None)
+    
+    records = []
+    for mode in modes:
+        cfg = AblationConfig(struct_mode=mode, k_total=250, seed=seed, device=device)
+        emb, gen_time, _ = generate_ablated_representation(G, pyg, y, train_mask, cfg)
+        m_res = evaluate_representation_probe(emb, y, train_mask, test_mask, probe_type=probe_type, edge_index=e_idx, device=device)
+        acc = m_res["accuracy"]
+        f1 = m_res["macro_f1"]
+        records.append({
+            "Dataset": dataset_name,
+            "Struct_Mode": mode,
+            "Accuracy": acc,
+            "Macro_F1": f1,
+            "Gen_Time_s": gen_time
+        })
+        print(f"  Mode: {mode:16s} | Acc = {acc:6.2f}% | Macro-F1 = {f1:6.2f}% | Latency = {gen_time:7.4f}s")
+        
+    df_results = pd.DataFrame(records)
+    csv_path = os.path.join(output_dir, f"ablation_backbone_sweep_{dataset_name}.csv")
+    df_results.to_csv(csv_path, index=False)
+    print(f"\n[Saved] Structural backbone results saved to: {csv_path}")
+    return df_results
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="NyS-Binary Systematic Ablation & Sensitivity Engine"
+    )
+    parser.add_argument(
+        "--sweep", "--mode",
+        dest="sweep",
+        type=str,
+        default="landmark_sweep",
+        choices=[
+            "landmark_sweep", "hops_sweep", "grid_sweep",
+            "budget_sweep", "backbone_sweep", "campaign", "full_factorial"
+        ],
+        help="Type of ablation sweep to execute (default: landmark_sweep)"
+    )
+    parser.add_argument(
+        "--dataset", "--datasets",
+        dest="datasets",
+        nargs="+",
+        default=["cora"],
+        help="Dataset(s) to evaluate (default: cora)"
+    )
+    parser.add_argument(
+        "--m_list",
+        nargs="+",
+        type=int,
+        default=[64, 125, 250, 500, 1000],
+        help="List of landmark counts m for landmark_sweep (default: 64 125 250 500 1000)"
+    )
+    parser.add_argument(
+        "--hops_list",
+        nargs="+",
+        type=int,
+        default=[0, 1, 2, 3, 4, 6, 8],
+        help="List of diffusion hops H for hops_sweep (default: 0 1 2 3 4 6 8)"
+    )
+    parser.add_argument(
+        "--ratios",
+        nargs="+",
+        type=float,
+        default=[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0],
+        help="List of structural ratios for budget_sweep"
+    )
+    parser.add_argument(
+        "--train_ratio",
+        type=float,
+        default=0.70,
+        help="Training node split ratio (default: 0.70)"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed (default: 42)"
+    )
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        default=[42],
+        help="Random seeds for campaign (default: [42])"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Compute device (default: cpu)"
+    )
+    parser.add_argument(
+        "--probe_type",
+        type=str,
+        default="gcn",
+        help="Probe classifier (gcn, graphsage, mlp, linkx, logistic, 4_classifiers)"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="Results",
+        help="Directory to save CSV outputs (default: Results)"
+    )
+    parser.add_argument(
+        "--fig_dir",
+        type=str,
+        default="figures",
+        help="Directory to save figure plots (default: figures)"
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        default=True,
+        help="Generate and save publication plots (default: True)"
+    )
+    parser.add_argument(
+        "--no-plot",
+        dest="plot",
+        action="store_false",
+        help="Disable plot generation"
+    )
+    
+    args = parser.parse_args()
+    
+    for ds_name in args.datasets:
+        if args.sweep == "landmark_sweep":
+            run_landmark_sweep(
+                dataset_name=ds_name,
+                m_list=args.m_list,
+                train_ratio=args.train_ratio,
+                seed=args.seed,
+                device=args.device,
+                probe_type=args.probe_type,
+                plot=args.plot,
+                output_dir=args.output_dir,
+                fig_dir=args.fig_dir
+            )
+        elif args.sweep == "hops_sweep":
+            run_hops_sweep(
+                dataset_name=ds_name,
+                hops_list=args.hops_list,
+                train_ratio=args.train_ratio,
+                seed=args.seed,
+                device=args.device,
+                probe_type=args.probe_type,
+                plot=args.plot,
+                output_dir=args.output_dir,
+                fig_dir=args.fig_dir
+            )
+        elif args.sweep in ["grid_sweep", "alpha_tau_sweep"]:
+            run_grid_sweep(
+                dataset_name=ds_name,
+                train_ratio=args.train_ratio,
+                seed=args.seed,
+                device=args.device,
+                probe_type=args.probe_type,
+                plot=args.plot,
+                output_dir=args.output_dir,
+                fig_dir=args.fig_dir
+            )
+        elif args.sweep == "budget_sweep":
+            run_budget_sweep(
+                dataset_name=ds_name,
+                ratios=args.ratios,
+                train_ratio=args.train_ratio,
+                seed=args.seed,
+                device=args.device,
+                probe_type=args.probe_type,
+                output_dir=args.output_dir
+            )
+        elif args.sweep == "backbone_sweep":
+            run_backbone_sweep(
+                dataset_name=ds_name,
+                train_ratio=args.train_ratio,
+                seed=args.seed,
+                device=args.device,
+                probe_type=args.probe_type,
+                output_dir=args.output_dir
+            )
+        elif args.sweep in ["campaign", "full_factorial"]:
+            df_camp = run_systematic_ablation_campaign(
+                dataset_names=args.datasets,
+                seeds=args.seeds,
+                train_ratios=[args.train_ratio],
+                device=args.device,
+                probe_type=args.probe_type,
+                checkpoint_dir=args.output_dir
+            )
+            table_path = os.path.join(args.output_dir, "comprehensive_ablation_table.csv")
+            df_table = build_comprehensive_ablation_table(df_camp)
+            df_table.to_csv(table_path)
+            print(f"\n[Saved] Comprehensive ablation table saved to: {table_path}")
+
+if __name__ == "__main__":
+    main()
+
