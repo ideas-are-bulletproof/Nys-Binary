@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import shutil
 import subprocess
 from typing import Optional, Tuple, Dict, Any
 
@@ -35,10 +36,17 @@ except ImportError:
 
 # Path to cloned external repos
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
-BENCHMARK_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "Final_benchmark"))
-BIGCN_DIR = os.path.join(BENCHMARK_DIR, "Bi-GCN")
-NODESIG_DIR = os.path.join(BENCHMARK_DIR, "NodeSig")
-N2B_DIR = os.path.join(BENCHMARK_DIR, "node2binary")
+
+def _resolve_baseline_dir(dirname: str) -> str:
+    """Finds baseline directory under BASE_DIR."""
+    return os.path.join(BASE_DIR, dirname)
+
+BENCHMARK_DIR = BASE_DIR
+BIGCN_DIR = _resolve_baseline_dir("Bi-GCN")
+NODESIG_DIR = _resolve_baseline_dir("NodeSig")
+N2B_DIR = _resolve_baseline_dir("node2binary")
+NODESKETCH_DIR = _resolve_baseline_dir("NodeSketch")
+LOAD_CACHED_BINARY = True
 
 # =============================================================================
 # Helper: Graph Adjacency Torch Tensor
@@ -86,6 +94,7 @@ def get_v1_blend_from_r_struct(
     hops: int = 2,
     alpha: float = 0.5,
     pseudo_threshold: float = 0.5,
+    mu: Optional[float] = None,
     device: str = "cpu",
     A_torch: Optional[torch.Tensor] = None
 ) -> np.ndarray:
@@ -93,6 +102,9 @@ def get_v1_blend_from_r_struct(
     Blends structural signatures with training label diffusion and confident pseudo-labels.
     Supports arbitrary structural vs. label bit ratios (struct_ratio in [0.0, 1.0]).
     Guarantees strict zero test label leakage.
+    Polynomial diffusion over graph topology follows the canonical 2-step accumulation + hops diffusion:
+      W_acc = P^hops * (W + P*W + P^2*W)
+    Adaptive median binarization uses threshold = (mu if mu is not None else alpha) * col_medians.
     """
     n = G.number_of_nodes()
     k_struct = R_struct.shape[1] if R_struct is not None else 0
@@ -177,7 +189,8 @@ def get_v1_blend_from_r_struct(
 
     # Convex combination and adaptive binarization threshold
     col_medians = torch.median(W_fused, dim=0).values
-    threshold = alpha * col_medians
+    threshold_factor = mu if mu is not None else alpha
+    threshold = threshold_factor * col_medians
 
     return (W_fused > threshold).float().cpu().numpy()
 
@@ -196,6 +209,7 @@ def fuse_alg_v1_nystrom_blend(
     hops: int = 3,
     alpha: float = 0.5,
     pseudo_threshold: float = 0.5,
+    mu: Optional[float] = None,
     device: str = "cpu",
     seed: int = 42,
     m_landmarks: int = 125,
@@ -210,6 +224,12 @@ def fuse_alg_v1_nystrom_blend(
         Fraction of total budget k allocated to structural features (e.g. 0.5 for 50/50, 0.7 for 70/30).
     k_struct : int, optional
         Explicit number of structural bits. If provided, overrides struct_ratio.
+    m_landmarks : int, default=125
+        Number of Nystrom landmark nodes (default 125 per Pareto analysis).
+    pseudo_threshold : float, default=0.5
+        Confidence gate threshold tau (default 0.50 per Section 4.1).
+    mu : float, optional
+        Quantile factor multiplier for adaptive median binarization. Defaults to alpha if None.
     """
     np.random.seed(seed)
     A_norm, A_torch = _get_A_torch(G, device)
@@ -247,7 +267,7 @@ def fuse_alg_v1_nystrom_blend(
     return get_v1_blend_from_r_struct(
         R_struct, G, pyg_data, labels, label_mask,
         k=k, hops=hops, alpha=alpha, pseudo_threshold=pseudo_threshold,
-        device=device, A_torch=A_torch
+        mu=mu, device=device, A_torch=A_torch
     )
 
 # =============================================================================
@@ -262,6 +282,7 @@ def fuse_alg_v1_svd_blend(
     hops: int = 2,
     alpha: float = 0.5,
     pseudo_threshold: float = 0.5,
+    mu: Optional[float] = None,
     device: str = "cpu",
     struct_ratio: float = 0.5,
     k_struct: Optional[int] = None
@@ -302,7 +323,7 @@ def fuse_alg_v1_svd_blend(
     return get_v1_blend_from_r_struct(
         R_struct, G, pyg_data, labels, label_mask,
         k=k, hops=hops, alpha=alpha, pseudo_threshold=pseudo_threshold,
-        device=device, A_torch=A_torch
+        mu=mu, device=device, A_torch=A_torch
     )
     
 # =============================================================================
@@ -317,6 +338,7 @@ def fuse_alg_v1_randomized_blend(
     hops: int = 3,
     alpha: float = 0.5,
     pseudo_threshold: float = 0.5,
+    mu: Optional[float] = None,
     device: str = "cpu",
     seed: int = 42,
     struct_ratio: float = 0.5,
@@ -350,7 +372,7 @@ def fuse_alg_v1_randomized_blend(
     return get_v1_blend_from_r_struct(
         R_struct, G, pyg_data, labels, label_mask,
         k=k, hops=hops, alpha=alpha, pseudo_threshold=pseudo_threshold,
-        device=device, A_torch=A_torch
+        mu=mu, device=device, A_torch=A_torch
     )
 
 #=============================================================================
@@ -590,7 +612,8 @@ def generate_official_nodesig_embeddings(
                 f.write(f"{src} {dst}\n")
 
     if not os.path.exists(out_file) or os.path.getsize(out_file) == 0:
-        exe_path = os.path.join(ns_dir, "nodesig.exe")
+        candidates = ["nodesig.exe", "nodesig"] if sys.platform.startswith("win") else ["nodesig", "nodesig.exe"]
+        exe_path = next((os.path.join(ns_dir, c) for c in candidates if os.path.exists(os.path.join(ns_dir, c))), os.path.join(ns_dir, candidates[0]))
         cmd = [exe_path, "--edgefile", in_file, "--embfile", out_file, "--walklen", str(hops), "--dim", str(k_nodesig)]
         res = subprocess.run(cmd, cwd=ns_dir, capture_output=True, text=True)
         if res.returncode != 0:
@@ -614,7 +637,7 @@ def generate_official_nodesig_embeddings(
 # =============================================================================
 NODESKETCH_DIR = os.path.join(BENCHMARK_DIR, "NodeSketch")
 
-MATLAB_EXE = r"C:\Program Files\MATLAB\R2026a\bin\matlab.exe"
+MATLAB_EXE = os.environ.get("MATLAB_EXE", shutil.which("matlab") or r"C:\Program Files\MATLAB\R2026a\bin\matlab.exe")
 
 
 def generate_official_nodesketch_embeddings(
@@ -866,7 +889,8 @@ def fuse_alg_v1_chebyshev_blend(
     k: int = 250,
     hops: int = 3,
     alpha: float = 0.5,
-    pseudo_threshold: float = 0.85,
+    pseudo_threshold: float = 0.5,
+    mu: Optional[float] = None,
     device: str = "cpu",
     seed: int = 42,
     order: int = 4
@@ -913,7 +937,7 @@ def fuse_alg_v1_chebyshev_blend(
     return get_v1_blend_from_r_struct(
         R_struct, G, pyg_data, labels, label_mask,
         k=k, hops=hops, alpha=alpha, pseudo_threshold=pseudo_threshold,
-        device=device, A_torch=A_torch
+        mu=mu, device=device, A_torch=A_torch
     )
 
 # Backward-compatible alias
@@ -933,8 +957,9 @@ if __name__ == '__main__':
     parser.add_argument('--k', type=int, default=250, help='Bitcode dimension (default: 250)')
     parser.add_argument('--hops', type=int, default=3, help='Graph diffusion hops (default: 3)')
     parser.add_argument('--alpha', type=float, default=0.5, help='Convex blend weight (default: 0.5)')
-    parser.add_argument('--pseudo_threshold', type=float, default=0.85, help='Pseudo-label confidence threshold (default: 0.85)')
-    parser.add_argument('--m_landmarks', type=int, default=500, help='Nystrom landmark count (default: 500)')
+    parser.add_argument('--pseudo_threshold', type=float, default=0.50, help='Pseudo-label confidence threshold tau (default: 0.50 per paper)')
+    parser.add_argument('--mu', type=float, default=0.50, help='Quantile factor multiplier mu for adaptive binarization (default: 0.50 per Eq. 5)')
+    parser.add_argument('--m_landmarks', type=int, default=125, help='Nystrom landmark count (default: 125 per paper)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed (default: 42)')
     parser.add_argument('--device', type=str, default='cpu', help='Device (cpu or cuda)')
     args = parser.parse_args()

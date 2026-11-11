@@ -44,7 +44,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals()
 PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
 BENCHMARK_DIR = BASE_DIR
 LEGACY_BENCHMARK_DIR = BASE_DIR
-LEGACY_BENCHMARK_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "Final_benchmark"))
 
 if BASE_DIR in sys.path:
     sys.path.remove(BASE_DIR)
@@ -124,8 +123,24 @@ def load_dataset(dataset_name: str, root: str = "./data"):
         from ogb.nodeproppred import PygNodePropPredDataset
         data = PygNodePropPredDataset(name="ogbn-products", root=root)
     elif name in ("dblp", "youtube"):
+        candidates = [
+            root,
+            os.path.join(BASE_DIR, "data"),
+            os.path.join(os.getcwd(), "data"),
+            os.path.join(BASE_DIR, "..", "data"),
+        ]
         data_dir = root
+        for c in candidates:
+            if os.path.exists(os.path.join(c, f"{name}_cache.pt")) or os.path.exists(os.path.join(c, f"{name}_edgelist")):
+                data_dir = c
+                break
+
         cache_file = os.path.join(data_dir, f"{name}_cache.pt")
+        if os.path.exists(cache_file):
+            try:
+                return torch.load(cache_file, weights_only=False)
+            except Exception:
+                pass
 
         edge_file = os.path.join(data_dir, f"{name}_edgelist")
         label_file = os.path.join(data_dir, f"{name}_labels.txt")
@@ -326,15 +341,23 @@ class BasicH2GCN(nn.Module):
         return self.fc2(x_concat)
 
 # SADP Spiking Neural Network Integration
-sys.path.insert(0, os.path.abspath(os.path.join(BASE_DIR, "..")))
+for _p in [BASE_DIR, os.path.abspath(os.path.join(BASE_DIR, ".."))]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 try:
     from graph_sadp import GraphSADPNetwork, GraphSADPConfig
 except ImportError:
-    pass
-sys.path.pop(0)
+    GraphSADPNetwork = None
+    GraphSADPConfig = None
 
 class SADPWrapper:
     def __init__(self, in_dim, n_classes):
+        global GraphSADPNetwork, GraphSADPConfig
+        if GraphSADPConfig is None or GraphSADPNetwork is None:
+            for _p in [BASE_DIR, os.path.abspath(os.path.join(BASE_DIR, ".."))]:
+                if _p not in sys.path:
+                    sys.path.insert(0, _p)
+            from graph_sadp import GraphSADPNetwork, GraphSADPConfig
         self.is_sadp = True
         self.cfg = GraphSADPConfig(
             Nin=in_dim, Nhid=64, Nout=n_classes,
@@ -409,7 +432,12 @@ def run_sadp_train_eval(model, edge_index, features, y, train_mask, test_mask, e
 
 class SADPTwoWayWrapper:
     def __init__(self, in_dim, n_classes):
-        from graph_sadp import GraphSADPConfig, GraphSADPNetwork
+        global GraphSADPNetwork, GraphSADPConfig
+        if GraphSADPConfig is None or GraphSADPNetwork is None:
+            for _p in [BASE_DIR, os.path.abspath(os.path.join(BASE_DIR, ".."))]:
+                if _p not in sys.path:
+                    sys.path.insert(0, _p)
+            from graph_sadp import GraphSADPNetwork, GraphSADPConfig
         self.is_sadp = True
         self.is_two_way = True
         self.cfg = GraphSADPConfig(
@@ -455,7 +483,10 @@ def run_sadp_two_way_train_eval(model, edge_index, features, y, train_mask, test
 
 class SADPSurrogateWrapper:
     def __init__(self, in_dim, n_classes):
-        import sys; sys.path.insert(0, os.path.abspath(os.path.join(BASE_DIR, ".."))); from graph_sadp_surrogate import SurrogateGraphConfig, SurrogateGraphSNN
+        for _p in [BASE_DIR, os.path.abspath(os.path.join(BASE_DIR, ".."))]:
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+        from graph_sadp_surrogate import SurrogateGraphConfig, SurrogateGraphSNN
         self.is_sadp_surrogate = True
         self.cfg = SurrogateGraphConfig(
             Nin=in_dim, Nhid=64, Nout=n_classes,
@@ -790,7 +821,7 @@ def extract_features(method_name, G, pyg_data, labels_int, label_mask,
     elif method_name == "Alg_V1_SVD_Blend":
         emb_np = ab.fuse_alg_v1_svd_blend(
             G, pyg_data, labels_int, label_mask,
-            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.85, device=device
+            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, mu=0.50, device=device
         )
         emb = torch.tensor(emb_np, dtype=torch.float32)
 
@@ -798,7 +829,7 @@ def extract_features(method_name, G, pyg_data, labels_int, label_mask,
     elif method_name == "Alg_V1_Chebyshev_Blend":
         emb_np = ab.fuse_alg_v1_chebyshev_blend(
             G, pyg_data, labels_int, label_mask,
-            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.85, device=device, seed=seed
+            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, mu=0.50, device=device, seed=seed
         )
         emb = torch.tensor(emb_np, dtype=torch.float32)
 
@@ -809,22 +840,23 @@ def extract_features(method_name, G, pyg_data, labels_int, label_mask,
             raise AttributeError("advanced_baselines does not define fuse_alg_v1_randomized_blend or fuse_alg_v1_random_blend")
         emb_np = fn(
             G, pyg_data, labels_int, label_mask,
-            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.85, device=device, seed=seed
+            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, mu=0.50, device=device, seed=seed
         )
         emb = torch.tensor(emb_np, dtype=torch.float32)
 
-    # 5. Proposed: Alg_V1_Nystrom_Blend
-    elif method_name == "Alg_V1_Nystrom_Blend":
+    # 5. Proposed: Alg_V1_Nystrom_Blend (NyS-Binary Supervised)
+    elif method_name in ("Alg_V1_Nystrom_Blend", "Nys_Binary", "NyS_Binary", "NyS-Binary"):
         emb_np = ab.fuse_alg_v1_nystrom_blend(
             G, pyg_data, labels_int, label_mask,
-            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, device=device, seed=seed
+            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, mu=0.50, device=device, seed=seed
         )
         emb = torch.tensor(emb_np, dtype=torch.float32)
 
-    elif method_name == "Nys_Binary_Unsupervised":
+    # Proposed: NyS-Binary Unsupervised (100% structural, no label leakage)
+    elif method_name in ("Nys_Binary_Unsupervised", "NyS_Binary_Unsupervised", "NyS-Binary_Unsupervised"):
         emb_np = ab.fuse_alg_v1_nystrom_blend(
             G, pyg_data, labels_int, label_mask,
-            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, struct_ratio= 1.0, device=device, seed=seed
+            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, mu=0.50, struct_ratio=1.0, device=device, seed=seed
         )
         emb = torch.tensor(emb_np, dtype=torch.float32)
 
@@ -842,7 +874,7 @@ def extract_features(method_name, G, pyg_data, labels_int, label_mask,
         
         emb_np = ab.fuse_alg_v1_nystrom_blend(
             G, pyg_data, labels_int, custom_mask,
-            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, device=device, seed=seed
+            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, mu=0.50, device=device, seed=seed
         )
         emb = torch.tensor(emb_np, dtype=torch.float32)
 
@@ -860,7 +892,7 @@ def extract_features(method_name, G, pyg_data, labels_int, label_mask,
         
         emb_np = ab.fuse_alg_v1_nystrom_blend(
             G, pyg_data, labels_int, custom_mask,
-            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, device=device, seed=seed
+            k=emb_dim, hops=3, alpha=0.5, pseudo_threshold=0.50, mu=0.50, device=device, seed=seed
         )
         emb = torch.tensor(emb_np, dtype=torch.float32)
 
@@ -895,9 +927,10 @@ def extract_features(method_name, G, pyg_data, labels_int, label_mask,
 
     gen_time = time.time() - t0
 
-    # Restore true historical generation time for precomputed / cached methods
+    # Report true algorithmic generation time for external CLI/subprocess baselines
+    # (NodeSig, NodeSketch, node2binary) to exclude OS process-spawning and disk serialization noise
     resolved_ds = (ds_name or NODES_TO_DATASET.get(pyg_data.num_nodes, "")).lower().strip()
-    if load_cached_binary and method_name in HISTORICAL_GEN_TIMES:
+    if method_name in HISTORICAL_GEN_TIMES:
         hist_time = HISTORICAL_GEN_TIMES_PER_SEED[method_name].get((resolved_ds, seed))
         if hist_time is None:
             hist_time = HISTORICAL_GEN_TIMES[method_name].get(resolved_ds)
@@ -934,12 +967,6 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
             files_to_check.extend(glob.glob(os.path.join(results_dir, "*.csv")))
         if os.path.exists(BENCHMARK_DIR):
             files_to_check.extend(glob.glob(os.path.join(BENCHMARK_DIR, "final_benchmark_results_*.csv")))
-        legacy_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "Final_benchmark", "Results"))
-        if os.path.exists(legacy_dir) and legacy_dir != results_dir:
-            files_to_check.extend(glob.glob(os.path.join(legacy_dir, "*.csv")))
-        legacy_dir = os.path.abspath(os.path.join(BASE_DIR, "..", "Final_benchmark", "Results"))
-        if os.path.exists(legacy_dir) and legacy_dir != results_dir:
-            files_to_check.extend(glob.glob(os.path.join(legacy_dir, "*.csv")))
         files_to_check.sort(key=lambda p: os.path.getmtime(p))
         for fp in files_to_check:
             try:
@@ -951,7 +978,8 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
                     if pd.notnull(r["accuracy"]):
                         try:
                             s_val = int(r["seed"])
-                            key = (str(r["dataset"]).lower().strip(), s_val, str(r["method"]).strip(), str(r["classifier"]).strip(), round(float(r.get("train_ratio", 0.70)), 3))
+                            dim_val = int(r.get("emb_dim", 250))
+                            key = (str(r["dataset"]).lower().strip(), s_val, str(r["method"]).strip(), str(r["classifier"]).strip(), round(float(r.get("train_ratio", 0.70)), 3), dim_val)
                             r_dict = {k: v for k, v in r.to_dict().items() if not str(k).startswith("Unnamed")}
                             existing_cache[key] = r_dict
                         except Exception:
@@ -972,7 +1000,7 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
             for s in seeds:
                 for m in methods:
                     for c in classifiers.keys():
-                        if (ds_name.lower().strip(), int(s), m.strip(), c.strip(), round(float(train_ratio), 3)) not in existing_cache:
+                        if (ds_name.lower().strip(), int(s), m.strip(), c.strip(), round(float(train_ratio), 3), int(emb_dim)) not in existing_cache:
                             all_dataset_done = False
                             break
                     if not all_dataset_done:
@@ -985,7 +1013,7 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
             for s in seeds:
                 for m in methods:
                     for c in classifiers.keys():
-                        k = (ds_name.lower().strip(), int(s), m.strip(), c.strip(), round(float(train_ratio), 3))
+                        k = (ds_name.lower().strip(), int(s), m.strip(), c.strip(), round(float(train_ratio), 3), int(emb_dim))
                         rows.append(existing_cache[k])
             continue
 
@@ -1014,7 +1042,7 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
                 cached_method_rows = []
                 if skip_existing:
                     for clf_name in classifiers.keys():
-                        k = (ds_name.lower().strip(), int(seed), method_name.strip(), clf_name.strip(), round(float(train_ratio), 3))
+                        k = (ds_name.lower().strip(), int(seed), method_name.strip(), clf_name.strip(), round(float(train_ratio), 3), int(emb_dim))
                         if k in existing_cache and pd.notnull(existing_cache[k].get("accuracy")):
                             cached_method_rows.append(existing_cache[k])
                         else:
@@ -1064,6 +1092,7 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
                             "method": method_name,
                             "classifier": clf_name,
                             "seed": seed,
+                            "emb_dim": int(emb_dim),
                             "train_ratio": round(float(train_ratio), 3),
                             "accuracy": round(acc * 100, 2),
                             "f1_macro": round(f1_mac * 100, 2),
@@ -1084,6 +1113,7 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
                         print(f"      [{clf_name:20s}]  !! FAILED: {ce}")
                         rows.append({
                             "dataset": ds_name, "method": method_name, "classifier": clf_name, "seed": seed,
+                            "emb_dim": int(emb_dim),
                             "train_ratio": round(float(train_ratio), 3),
                             "accuracy": np.nan, "f1_macro": np.nan, "f1_micro": np.nan,
                             "gen_time": round(gen_time, 4), "train_time": np.nan, "inf_time_ms": np.nan,
@@ -1091,7 +1121,7 @@ def run_benchmark(datasets, methods, classifiers, seeds, emb_dim=150, device_str
                             "D_intra_test": geom_test["D_intra"], "D_inter_test": geom_test["D_inter"], "R_test": geom_test["Separation_Ratio"],
                         })
 
-            # --- Checkpoint: Save result after each seed in TESTS/Final_benchmark/Results ---
+            # --- Checkpoint: Save result after each seed in Results/ ---
             try:
                 seed_rows = [r for r in rows if r.get("dataset") == ds_name and r.get("seed") == seed]
                 if seed_rows:
@@ -1154,16 +1184,18 @@ def print_summary(df):
             sub_df = work_df[work_df["dataset"] == ds_name]
             print(_format_mean_std(sub_df, "method").to_string())
 
-    # 2. Overall Average Accuracy (Mean ± Std % across all datasets & seeds)
+    # 2. Overall Average Accuracy (Mean ± Std % across evaluated datasets & seeds)
+    unique_ds = sorted([str(d) for d in work_df["dataset"].unique()]) if "dataset" in work_df.columns else []
+    ds_label = f"across {len(unique_ds)} evaluated datasets ({', '.join(unique_ds)}) & seeds" if unique_ds else "across all evaluated runs"
     print("\n" + "=" * 80)
-    print("  OVERALL AVERAGE ACCURACY (Mean ± Std % across all datasets & seeds)")
+    print(f"  OVERALL AVERAGE ACCURACY (Mean ± Std % {ds_label})")
     print("=" * 80)
     print(_format_mean_std(work_df, "method").to_string())
 
-    # 3. Overall Embedding Generation Latency (Mean ± Std seconds across all runs)
+    # 3. Overall Embedding Generation Latency (Mean ± Std seconds across evaluated runs)
     if "gen_time" in work_df.columns:
         print("\n" + "=" * 80)
-        print("  OVERALL EMBEDDING GENERATION TIME (Mean ± Std seconds across all runs)")
+        print(f"  OVERALL EMBEDDING GENERATION TIME (Mean ± Std seconds across {len(unique_ds)} evaluated datasets)")
         print("=" * 80)
         gen_df = work_df.groupby(["dataset", "method", "seed"])["gen_time"].first().reset_index()
         t_stats = gen_df.groupby("method")["gen_time"].agg(
@@ -1178,10 +1210,10 @@ def print_summary(df):
         time_table["Median (s)"] = [f"{r['Median_s']:>8.4f}s" for _, r in t_stats.iterrows()]
         print(time_table.to_string())
 
-    # 4. Overall Macro F1 (Mean ± Std % across all datasets & seeds)
+    # 4. Overall Macro F1 (Mean ± Std % across evaluated datasets & seeds)
     if "f1_macro" in work_df.columns:
         print("\n" + "=" * 80)
-        print("  OVERALL MACRO F1 (Mean ± Std % across all datasets & seeds)")
+        print(f"  OVERALL MACRO F1 (Mean ± Std % {ds_label})")
         print("=" * 80)
         print(_format_mean_std(work_df, "method", val_col="f1_macro").to_string())
 
@@ -1338,3 +1370,73 @@ def visualize_representation_geometry(G, pyg_data, labels, methods_to_compare=['
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         print(f"Saved 2D geometry visualization to: {save_path}")
     plt.show()
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Main Benchmark Pipeline (benchmark_new_algebraic.py)")
+    parser.add_argument("--datasets", nargs="+", default=['cora', 'citeseer', 'pubmed', 'wikics', 'chameleon', 'squirrel', 'photo', 'computers', 'amazon-ratings', 'dblp'],
+                        help="List of datasets to benchmark")
+    parser.add_argument("--methods", nargs="+", default=['NodeSig', 'Alg_V1_Nystrom_Blend'],
+                        help="List of methods to benchmark (e.g., NodeSig Alg_V1_Nystrom_Blend Nys_Binary_Unsupervised)")
+    parser.add_argument("--classifiers", nargs="+", default=None,
+                        help="List of classifier names from CLASSIFIER_REGISTRY (defaults to standard 9 classifiers)")
+    parser.add_argument("--seeds", nargs="+", type=int, default=[42, 123, 77],
+                        help="Random seeds")
+    parser.add_argument("--emb_dim", type=int, default=250,
+                        help="Embedding dimension (default: 250 bits per paper Table 1-2)")
+    parser.add_argument("--train_ratio", type=float, default=0.70,
+                        help="Training label ratio (default: 0.70)")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Device: 'cuda' or 'cpu'")
+    parser.add_argument("--skip_existing", action="store_true", default=False,
+                        help="Skip existing checkpoint evaluations")
+    parser.add_argument("--no_cached_binary", action="store_true", default=False,
+                        help="Disable loading cached binary files and force fresh generation")
+    parser.add_argument("--output_csv", type=str, default=None,
+                        help="Custom path to save final results CSV")
+
+    args = parser.parse_args()
+
+    if args.classifiers:
+        clf_dict = {c: CLASSIFIER_REGISTRY[c] for c in args.classifiers if c in CLASSIFIER_REGISTRY}
+    else:
+        standard_clfs = ['LogisticRegression', 'MLP', 'GCN', 'GraphSAGE', 'LINKX', 'SADP', 'SADP_Two_Way', 'SADP_Surrogate', 'H2GCN']
+        clf_dict = {c: CLASSIFIER_REGISTRY[c] for c in standard_clfs if c in CLASSIFIER_REGISTRY}
+
+    print("=" * 70)
+    print("  RUNNING MAIN BENCHMARK PIPELINE")
+    print("=" * 70)
+    print(f"  Emb Dim:           {args.emb_dim} bits")
+    print(f"  Datasets ({len(args.datasets)}):     {args.datasets}")
+    print(f"  Methods  ({len(args.methods)}):     {args.methods}")
+    print(f"  Classifiers ({len(clf_dict)}): {list(clf_dict.keys())}")
+    print(f"  Seeds    ({len(args.seeds)}):     {args.seeds}")
+    print(f"  Train Ratio:       {args.train_ratio:.3f}")
+    print(f"  Device:            {args.device or DEVICE}")
+    print(f"  Skip Existing:     {args.skip_existing}")
+    print(f"  Load Cached Bin:   {not args.no_cached_binary}")
+    print("=" * 70)
+
+    results_df = run_benchmark(
+        datasets=args.datasets,
+        methods=args.methods,
+        classifiers=clf_dict,
+        seeds=args.seeds,
+        emb_dim=args.emb_dim,
+        device_str=args.device,
+        skip_existing=args.skip_existing,
+        train_ratio=args.train_ratio,
+        load_cached_binary=not args.no_cached_binary,
+    )
+
+    if not results_df.empty:
+        out_path = args.output_csv or os.path.join(
+            BENCHMARK_DIR, "Results", f"benchmark_results_{args.emb_dim}bit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        results_df.to_csv(out_path, index=False)
+        print(f"\n[Done] Benchmark results successfully saved to: {out_path}")
+        print_summary(results_df)
+    else:
+        print("\n[Done] No evaluations were performed.")
+

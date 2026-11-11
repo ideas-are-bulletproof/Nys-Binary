@@ -60,7 +60,7 @@ class AblationConfig:
     
     # Landmark Sampling & Count
     landmark_strategy: str = "uniform"  # "uniform", "degree_weighted", "kmeans_pp"
-    m_landmarks: Optional[int] = None   # None -> default min(n, max(2*k_struct, 500))
+    m_landmarks: Optional[int] = 125    # Default 125 per Pareto efficiency analysis in Section 8 / Table 7
     
     # Budget & Split
     k_total: int = 250
@@ -77,10 +77,10 @@ class AblationConfig:
     rw_depth: int = 3                   # steps of RW diffusion to produce pseudo-label probabilities
     
     # Confidence Gate
-    pseudo_threshold: float = 0.85
+    pseudo_threshold: float = 0.50      # Default tau = 0.50 confidence gate per Section 4.1
     
     # Polynomial Diffusion Function
-    diffusion_mode: str = "polynomial_acc"  # "polynomial_acc", "hops_only", "single_power", "none"
+    diffusion_mode: str = "polynomial_acc"  # "polynomial_acc" (default 2-step accumulation + hops diffusion)
     
     # Diffusion Radius
     hops: int = 3
@@ -88,8 +88,11 @@ class AblationConfig:
     # Dual-Stream Fusion Weight
     alpha: float = 0.5
     
+    # Quantile Threshold Factor (Eq. 5)
+    mu: float = 0.50                    # Default mu = 0.50 quantile factor decoupled from alpha per Eq. (5)
+    
     # Binarization Threshold Formula
-    threshold_mode: str = "alpha_median"  # "alpha_median", "fixed_half", "column_mean", "unscaled_median", "continuous"
+    threshold_mode: str = "adaptive_median"  # "adaptive_median" (Eq. 5: mu * col_median), "alpha_median", "fixed_half", "column_mean", "unscaled_median", "continuous"
     
     # Final Quantization
     binarize: bool = True
@@ -193,11 +196,11 @@ def generate_ablated_representation(
         R_struct = torch.tensor(np.ascontiguousarray(PE), dtype=torch.float32, device=dev)
         
     else:  # Default: "nystrom"
-        # Landmark count selection
+        # Landmark count selection (default m=125)
         if cfg.m_landmarks is not None:
             m = min(n, cfg.m_landmarks)
         else:
-            m = min(n, max(k_struct * 2, 500))
+            m = min(n, 125)
         diagnostics["m_landmarks"] = m
         
         # Landmark sampling strategy
@@ -337,7 +340,7 @@ def generate_ablated_representation(
             for _ in range(2):
                 curr = torch.sparse.mm(A_torch, curr)
                 W_acc += curr
-            for _ in range(cfg.hops):
+            for _ in range(max(1, cfg.hops)):
                 W_acc = torch.sparse.mm(A_torch, W_acc)
             return W_acc
 
@@ -370,7 +373,7 @@ def generate_ablated_representation(
         W_fused = (1.0 - cfg.alpha) * W_svd_acc + cfg.alpha * W_v7_acc
 
     # -------------------------------------------------------------------------
-    # Adaptive Binarization Threshold & Quantization
+    # Adaptive Binarization Threshold & Quantization (Eq. 5)
     # -------------------------------------------------------------------------
     if not cfg.binarize or cfg.threshold_mode == "continuous":
         out = W_fused.float().cpu().numpy()
@@ -379,12 +382,16 @@ def generate_ablated_representation(
             threshold = 0.5
         elif cfg.threshold_mode == "column_mean":
             col_means = torch.mean(W_fused, dim=0)
-            threshold = cfg.alpha * col_means
+            threshold = cfg.mu * col_means
         elif cfg.threshold_mode == "unscaled_median":
             threshold = torch.median(W_fused, dim=0).values
-        else:  # Default: "alpha_median" (alpha * col_median)
+        elif cfg.threshold_mode == "alpha_median":
+            # Legacy mode scaling by alpha
             col_medians = torch.median(W_fused, dim=0).values
             threshold = cfg.alpha * col_medians
+        else:  # Default: "adaptive_median" / Eq. (5) (mu * col_median)
+            col_medians = torch.median(W_fused, dim=0).values
+            threshold = cfg.mu * col_medians
             
         out = (W_fused > threshold).float().cpu().numpy()
 
@@ -399,13 +406,16 @@ CANONICAL_BASELINES: Dict[str, AblationConfig] = {
     "Full_NyS_Binary (Ours)": AblationConfig(
         name="Full_NyS_Binary (Ours)",
         struct_mode="nystrom",
+        m_landmarks=125,
         struct_ratio=0.5,
         enable_gt_channel=True,
         enable_pseudo_channel=True,
-        pseudo_threshold=0.85,
+        pseudo_threshold=0.50,
         hops=3,
         alpha=0.5,
-        threshold_mode="alpha_median",
+        mu=0.5,
+        diffusion_mode="polynomial_acc",
+        threshold_mode="adaptive_median",
         binarize=True
     ),
     "Baseline: Structural-Only": AblationConfig(
