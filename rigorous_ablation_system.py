@@ -331,7 +331,7 @@ def generate_ablated_representation(
         elif cfg.diffusion_mode == "single_power":
             # Direct single higher power A^hops (no polynomial accumulation)
             curr = W_init
-            for _ in range(max(1, cfg.hops)):
+            for _ in range(cfg.hops):
                 curr = torch.sparse.mm(A_torch, curr)
             return curr
         else:  # Default: "polynomial_acc" (2-step accumulation + hops diffusion)
@@ -340,7 +340,7 @@ def generate_ablated_representation(
             for _ in range(2):
                 curr = torch.sparse.mm(A_torch, curr)
                 W_acc += curr
-            for _ in range(max(1, cfg.hops)):
+            for _ in range(cfg.hops):
                 W_acc = torch.sparse.mm(A_torch, W_acc)
             return W_acc
 
