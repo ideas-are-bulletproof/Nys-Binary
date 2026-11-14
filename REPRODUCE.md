@@ -9,7 +9,7 @@ This document details how to reproduce all benchmark tables, main manuscript fig
 `Main.ipynb` reproduces **Table 1** (per-dataset accuracy across 9 classifiers), **Table 2** (macro-averaged performance), and **Table 3** (representation generation latency).
 
 ### Notebook Configuration
-Open [`Main.ipynb`](Main.ipynb). In **Cell 2**, configure the evaluation parameters:
+Open [`Main.ipynb`](Main.ipynb). In **Cell 2**, configure the evaluation parameters and datasets:
 
 ```python
 # -------------------------------------------------------------
@@ -19,12 +19,58 @@ emb_dim = 250                    # Bit budget (250 bits for Table 1-2)
 train_ratio = 0.70               # 70% stratified training split
 seeds = [42, 123, 77]            # 3 random seeds
 load_previous_checkpoint = False # False = fresh evaluation from scratch
+
+# --- Datasets ---
+datasets = [
+    'cora',
+    'citeseer',
+    'pubmed',
+    'wikics',
+    'chameleon',
+    'squirrel',
+    'photo',
+    'computers',
+    'amazon-ratings',
+    'dblp',
+
+    ##### Highly Heterophilic Datasets (Uncomment to run) #####
+    # 'actor',
+    # 'texas',
+    # 'wisconsin',
+    # 'minesweeper',
+
+    ### Large Datasets (Uncomment to run) ###
+    # 'ogbn-arxiv',
+    # 'ogbn-products',
+]
 ```
+
+### Dataset Selection: Running OGB & Heterophilic Graphs
+In [`Main.ipynb`](Main.ipynb) **Cell 2**, all supported datasets are organized inside the `datasets` list:
+
+1. **Default Run (10 Benchmark Graphs):**  
+   The notebook comes pre-configured with the 10 benchmark datasets uncommented (`cora`, `citeseer`, `pubmed`, `wikics`, `chameleon`, `squirrel`, `photo`, `computers`, `amazon-ratings`, `dblp`).
+2. **Running Large-Scale OGB Datasets (`ogbn-arxiv`, `ogbn-products`):**  
+   To evaluate large-scale graphs (e.g. `ogbn-arxiv` with $N=169{,}343$ nodes or `ogbn-products` with $N=2{,}449{,}029$ nodes), **simply uncomment the dataset line in the `datasets` list**:
+   ```python
+   ### Large Datasets ###
+   'ogbn-arxiv',     # <-- Uncomment to run ogbn-arxiv (Table 10)
+   # 'ogbn-products' # <-- Uncomment to run ogbn-products
+   ```
+3. **Running Additional Heterophilic Datasets (`texas`, `wisconsin`, `actor`, `minesweeper`):**  
+   To evaluate the additional heterophilic benchmarks reported in Appendix A.6, **uncomment the respective dataset lines** under `##### Highly Heterophilic Datasets #####`.
+4. **Running a Single Dataset for Fast Testing:**  
+   To run a quick single-dataset test (e.g., just `ogbn-arxiv` or `cora`), comment out the other datasets and leave only your target dataset:
+   ```python
+   datasets = [
+       'ogbn-arxiv',  # Run solely on ogbn-arxiv
+   ]
+   ```
 
 ### Execution Steps
 * **Cell 1**: Imports core dependencies and verifies PyTorch / CUDA device setup.
-* **Cell 2**: Sets the evaluation hyperparameters above.
-* **Cell 3**: Runs the complete evaluation across all 10 datasets and 9 downstream classifiers. Results are saved automatically to `./Results/final_benchmark_results_latest.csv`.
+* **Cell 2**: Sets the evaluation hyperparameters and active dataset selection above.
+* **Cell 3**: Runs the complete evaluation across the selected datasets and 9 downstream classifiers. Results are saved automatically to `./Results/final_benchmark_results_latest.csv`.
 * **Cells 4 & 5**: Formats and prints the consolidated tables (mean ± std accuracy, macro-F1, and generation runtime).
 
 ### Alternative: Run via Command Line
@@ -36,6 +82,13 @@ python benchmark_new_algebraic.py --emb_dim 250 --train_ratio 0.70 --seeds 42 12
 
 # Fast validation on citation networks (Cora, CiteSeer, PubMed)
 python benchmark_new_algebraic.py --datasets cora citeseer pubmed --emb_dim 250
+
+# Run on large-scale OGB datasets (Table 10)
+python benchmark_new_algebraic.py --datasets ogbn-arxiv --emb_dim 250
+python benchmark_new_algebraic.py --datasets ogbn-products --emb_dim 250
+
+# Run on specialized heterophilic graphs (Appendix A.6)
+python benchmark_new_algebraic.py --datasets texas wisconsin actor minesweeper --emb_dim 250
 ```
 
 ---
